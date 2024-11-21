@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create two VPCs, an EC2 instance accessible via AWS SSM, and a Lambda function.
+
+Parameters:
+  KeyName:
+    Type: String
+    Description: (Optional) Name of an existing EC2 KeyPair for SSH access to the instance. Leave empty if not needed.
+
+Resources:
+  # VPCs
+  VPCAlief:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC-alief
+
+  VPCTakatux:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.1.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: VPC-takatux
+
+  # Subnets for VPC-alief
+  SubnetAlief:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCAlief
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  # Subnets for VPC-takatux
+  SubnetTakatux:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPCTakatux
+      CidrBlock: 10.1.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  # Internet Gateway and Routes for VPC-alief
+  InternetGatewayAlief:
+    Type: AWS::EC2::InternetGateway
+
+  AttachInternetGatewayAlief:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPCAlief
+      InternetGatewayId: !Ref InternetGatewayAlief
+
+  RouteTableAlief:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPCAlief
+
+  RouteAlief:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref RouteTableAlief
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGatewayAlief
+
+  RouteTableAssociationAlief:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetAlief
+      RouteTableId: !Ref RouteTableAlief
+
+  # Security Group for EC2
+  SecurityGroupEC2:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPCAlief
+      GroupDescription: Security group for EC2 instance
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0 # Ensure the SG allows SSM Agent traffic.
+
+  # IAM Role for SSM Access
+  EC2SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AmazonSSMManagedInstanceCorePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:*
+                  - ec2messages:*
+                  - cloudwatch:PutMetricData
+                Resource: "*"
+
+  InstanceProfileSSM:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2SSMRole
+
+  # EC2 Instance
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      ImageId: ami-07c9c7aaab42cba5a # Amazon Linux 2 AMI ID (adjust based on your region)
+      SubnetId: !Ref SubnetAlief
+      SecurityGroupIds:
+        - !Ref SecurityGroupEC2
+      IamInstanceProfile: !Ref InstanceProfileSSM
+      Tags:
+        - Key: Name
+          Value: EC2-in-VPC-alief
+
+  # IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaBasicExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # Lambda Function
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: LambdaInVPC-takatux
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': 'Hello, this is from Lambda'
+              }
+      VpcConfig:
+        SubnetIds:
+          - !Ref SubnetTakatux
+        SecurityGroupIds:
+          - !Ref SecurityGroupLambda
+
+  # Security Group for Lambda
+  SecurityGroupLambda:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VPCTakatux
+      GroupDescription: Allow Lambda access
+
+Outputs:
+  EC2InstancePublicIP:
+    Description: Public IP address of the EC2 instance (may be blank if using SSM only)
+    Value: !GetAtt EC2Instance.PublicIp
+
+  LambdaFunctionName:
+    Description: Name of the Lambda function
+    Value: !Ref LambdaFunction
